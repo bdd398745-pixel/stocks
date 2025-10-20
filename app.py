@@ -2,159 +2,168 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import ta
 import plotly.graph_objects as go
+from ta.momentum import RSIIndicator
+from ta.trend import MACD
 
-st.set_page_config(page_title="Stock Signal Dashboard", layout="wide")
+st.set_page_config(page_title="📈 Smart Stock Analyzer", layout="wide")
 
 # -----------------------------------------------------
-# HELPER FUNCTION TO DOWNLOAD DATA
+# Helper function to safely fetch data
 # -----------------------------------------------------
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def get_data(ticker, period, interval):
-    df = yf.download(ticker, period=period, interval=interval, progress=False)
+    try:
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        if df.empty:
+            return pd.DataFrame()
 
-    if df.empty:
+        # Handle multi-level columns (common for yfinance)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(-1)
+
+        df = df.reset_index()
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date")
+
+        # Drop rows with missing close
+        if "Close" not in df.columns:
+            raise KeyError("No 'Close' column found in Yahoo data.")
+
+        return df
+
+    except Exception as e:
+        st.warning(f"⚠️ Data fetch failed: {e}")
         return pd.DataFrame()
 
-    # Handle MultiIndex columns from yfinance (e.g. ('Close', 'TCS.NS'))
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]  # flatten
-
-    # Make sure Close is a 1-D Series
-    close = df["Close"]
-    if isinstance(close, pd.DataFrame):
-        close = close.squeeze()
-    df["Close"] = close
-
-    return df
-
-
 # -----------------------------------------------------
-# CALCULATE TECHNICAL INDICATORS
+# Technical indicator calculation
 # -----------------------------------------------------
-def add_indicators(df):
-    df["EMA20"] = ta.trend.EMAIndicator(df["Close"], window=20).ema_indicator()
-    df["EMA50"] = ta.trend.EMAIndicator(df["Close"], window=50).ema_indicator()
-    macd = ta.trend.MACD(df["Close"])
+def compute_indicators(df):
+    macd = MACD(close=df["Close"], window_slow=26, window_fast=12, window_sign=9)
     df["MACD"] = macd.macd()
-    df["MACD_signal"] = macd.macd_signal()
+    df["Signal"] = macd.macd_signal()
+    df["RSI"] = RSIIndicator(close=df["Close"], window=14).rsi()
+
+    # Generate buy/sell signals (MACD crossover + RSI confirmation)
+    df["Buy_Signal"] = np.where(
+        (df["MACD"] > df["Signal"]) & (df["RSI"] < 60), df["Close"], np.nan
+    )
+    df["Sell_Signal"] = np.where(
+        (df["MACD"] < df["Signal"]) & (df["RSI"] > 40), df["Close"], np.nan
+    )
+
     return df
 
-
 # -----------------------------------------------------
-# GENERATE SIGNAL
+# Intelligent signal summary
 # -----------------------------------------------------
-def generate_signals(df):
-    if len(df) < 2:
-        return "HOLD"
-
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    macd_cross = (prev["MACD"] < prev["MACD_signal"]) and (latest["MACD"] > latest["MACD_signal"])
-    macd_bear = (prev["MACD"] > prev["MACD_signal"]) and (latest["MACD"] < latest["MACD_signal"])
-
-    buy_signal = (latest["EMA20"] > latest["EMA50"]) and macd_cross
-    sell_signal = (latest["EMA20"] < latest["EMA50"]) and macd_bear
-
-    if buy_signal:
+def latest_signal(df):
+    last_row = df.iloc[-1]
+    if last_row["MACD"] > last_row["Signal"] and last_row["RSI"] < 60:
         return "BUY"
-    elif sell_signal:
+    elif last_row["MACD"] < last_row["Signal"] and last_row["RSI"] > 40:
         return "SELL"
     else:
         return "HOLD"
 
+# -----------------------------------------------------
+# UI Layout
+# -----------------------------------------------------
+st.title("📊 Smart Stock Analyzer (India)")
+
+st.markdown("""
+Analyze any Indian stock in real time with technical indicators — MACD, RSI, and intelligent buy/sell detection.
+""")
+
+with st.sidebar:
+    st.header("⚙️ Settings")
+
+    ticker = st.text_input(
+        "Search Stock (e.g. TCS.NS, RELIANCE.NS, HDFCBANK.NS):",
+        value="TCS.NS",
+        placeholder="Enter NSE stock symbol ending with .NS"
+    )
+
+    period = st.selectbox("Select Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"], index=2)
+    interval = st.selectbox("Select Interval", ["1d", "1h", "30m", "15m"], index=0)
 
 # -----------------------------------------------------
-# UI CONTROLS
+# Fetch data
 # -----------------------------------------------------
-st.title("📊 Stock Technical Signal Dashboard")
-
-ticker_list = ["TCS.NS", "INFY.NS", "RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
-selected_ticker = st.selectbox("Select Stock", ticker_list)
-period = st.selectbox("Select Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
-interval = st.selectbox("Select Interval", ["1d", "1h", "15m"], index=0)
-
-# -----------------------------------------------------
-# FETCH DATA
-# -----------------------------------------------------
-df = get_data(selected_ticker, period, interval)
+df = get_data(ticker, period, interval)
 if df.empty:
-    st.error("No data returned from Yahoo Finance for this stock.")
+    st.error("No data available for the entered ticker. Try again with a valid NSE code (e.g. INFY.NS).")
     st.stop()
 
-df = add_indicators(df)
-signal = generate_signals(df)
+df = compute_indicators(df)
+signal = latest_signal(df)
 
 # -----------------------------------------------------
-# METRICS & SIGNAL DISPLAY
+# Layout metrics
 # -----------------------------------------------------
 col1, col2 = st.columns([1, 3])
-
 with col1:
-    current_price = df["Close"].iloc[-1]
-
-    # Fix: if Series (multi-column issue), convert safely
-    if isinstance(current_price, pd.Series):
-        current_price = float(current_price.squeeze())
-    else:
-        current_price = float(current_price)
-
-    st.metric("Current Price", f"₹{current_price:.2f}")
+    current_price = float(df["Close"].iloc[-1])
+    st.metric("Current Price", f"₹{current_price:,.2f}")
 
     if signal == "BUY":
-        st.success("✅ **BUY Signal Detected**")
+        st.success("✅ BUY Signal Detected")
     elif signal == "SELL":
-        st.error("🚨 **SELL Signal Detected**")
+        st.error("🔻 SELL Signal Detected")
     else:
-        st.info("⏸️ **HOLD — No Clear Signal**")
+        st.info("⚪ HOLD — No clear trend yet")
 
+# -----------------------------------------------------
+# Plot graph with Buy/Sell markers
+# -----------------------------------------------------
 with col2:
     fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df["Open"],
-        high=df["High"],
-        low=df["Low"],
-        close=df["Close"],
-        name="Candlestick"
-    ))
+
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["EMA20"], line=dict(color="blue", width=1.5), name="EMA 20"
+        x=df["Date"], y=df["Close"],
+        mode='lines', name='Close Price', line=dict(color='royalblue', width=2)
     ))
+
+    # Buy markers
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["EMA50"], line=dict(color="orange", width=1.5), name="EMA 50"
+        x=df["Date"], y=df["Buy_Signal"],
+        mode="markers", name="Buy Signal",
+        marker=dict(symbol="triangle-up", size=12, color="limegreen")
+    ))
+
+    # Sell markers
+    fig.add_trace(go.Scatter(
+        x=df["Date"], y=df["Sell_Signal"],
+        mode="markers", name="Sell Signal",
+        marker=dict(symbol="triangle-down", size=12, color="red")
     ))
 
     fig.update_layout(
-        title=f"{selected_ticker} Price Chart with EMAs",
+        title=f"{ticker} — Price with Buy/Sell Indicators",
         xaxis_title="Date",
         yaxis_title="Price (₹)",
-        xaxis_rangeslider_visible=False,
         template="plotly_white",
-        height=500
+        hovermode="x unified",
+        height=600,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------------------------------
-# MACD CHART
+# Optional: Indicator chart below
 # -----------------------------------------------------
-st.subheader("📈 MACD Trend")
-macd_fig = go.Figure()
-macd_fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD", line=dict(color="green")))
-macd_fig.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal", line=dict(color="red", dash="dot")))
+with st.expander("📈 View Technical Indicators (MACD + RSI)"):
+    macd_fig = go.Figure()
+    macd_fig.add_trace(go.Scatter(x=df["Date"], y=df["MACD"], name="MACD", line=dict(color='orange')))
+    macd_fig.add_trace(go.Scatter(x=df["Date"], y=df["Signal"], name="Signal", line=dict(color='blue', dash='dot')))
+    macd_fig.update_layout(title="MACD vs Signal Line", height=300, template="plotly_white")
+    st.plotly_chart(macd_fig, use_container_width=True)
 
-macd_fig.update_layout(
-    xaxis_title="Date",
-    yaxis_title="MACD Value",
-    template="plotly_white",
-    height=300
-)
-
-st.plotly_chart(macd_fig, use_container_width=True)
-
-# -----------------------------------------------------
-# DATA TABLE (OPTIONAL)
-# -----------------------------------------------------
-st.dataframe(df.tail(10))
+    rsi_fig = go.Figure()
+    rsi_fig.add_trace(go.Scatter(x=df["Date"], y=df["RSI"], name="RSI", line=dict(color='purple')))
+    rsi_fig.add_hline(y=70, line_dash="dash", line_color="red")
+    rsi_fig.add_hline(y=30, line_dash="dash", line_color="green")
+    rsi_fig.update_layout(title="RSI Indicator", height=300, template="plotly_white")
+    st.plotly_chart(rsi_fig, use_container_width=True)
