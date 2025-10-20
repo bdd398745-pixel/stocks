@@ -2,146 +2,121 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import ta  # for technical indicators
 
-st.set_page_config(page_title="Stock Buy/Sell Signal", layout="wide")
+# ----------------------------
+# PAGE CONFIG
+# ----------------------------
+st.set_page_config(page_title="Smart Stock Signals", layout="wide")
+st.title("📈 Smart Stock Buy/Sell Signal Tracker")
 
-st.title("📈 Intelligent Stock Buy/Sell Signal Dashboard (India)")
-
-st.markdown("""
-This tool scans Indian stocks, identifies top 10 trending ones,  
-and shows **Buy / Sell / Hold** signals based on EMA, RSI, and MACD.
-""")
-
-# ------------------------
-# Config
-# ------------------------
+# ----------------------------
+# SELECT STOCKS
+# ----------------------------
 TICKERS = [
-    "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS","LT.NS",
-    "ITC.NS","SBIN.NS","AXISBANK.NS","BAJAJFINSV.NS","KOTAKBANK.NS","MARUTI.NS",
-    "HINDUNILVR.NS","SUNPHARMA.NS","TITAN.NS","POWERGRID.NS","NTPC.NS","ULTRACEMCO.NS",
-    "JSWSTEEL.NS","ADANIENT.NS"
+    "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
+    "SBIN.NS", "LT.NS", "BAJFINANCE.NS", "MARUTI.NS", "AXISBANK.NS"
 ]
 
-LOOKBACK_DAYS = 365
-MIN_AVG_VOL = 300000
-TARGET_PCT = 0.12
-STOP_PCT = 0.06
+st.sidebar.header("⚙️ Settings")
+selected_ticker = st.sidebar.selectbox("Select a Stock", TICKERS)
+period = st.sidebar.selectbox("Period", ["3mo", "6mo", "1y", "2y"], index=2)
 
-# ------------------------
-# Indicator functions
-# ------------------------
-def ema(series, span):
-    return series.ewm(span=span, adjust=False).mean()
+# ----------------------------
+# FETCH DATA
+# ----------------------------
+@st.cache_data
+def get_data(ticker, period):
+    df = yf.download(ticker, period=period, interval="1d", progress=False)
+    df.dropna(inplace=True)
+    df["EMA20"] = ta.trend.EMAIndicator(df["Close"], window=20).ema_indicator()
+    df["EMA50"] = ta.trend.EMAIndicator(df["Close"], window=50).ema_indicator()
+    macd = ta.trend.MACD(df["Close"])
+    df["MACD"] = macd.macd()
+    df["MACD_signal"] = macd.macd_signal()
+    return df
 
-def rsi(series, period=14):
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    ma_up = up.rolling(period).mean()
-    ma_down = down.rolling(period).mean()
-    rs = ma_up / ma_down
-    return 100 - (100 / (1 + rs))
+df = get_data(selected_ticker, period)
 
-def macd(series, fast=12, slow=26, signal=9):
-    ema_fast = ema(series, fast)
-    ema_slow = ema(series, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = ema(macd_line, signal)
-    return macd_line, signal_line
-
-# ------------------------
-# Analyze each ticker
-# ------------------------
-def analyze_ticker(ticker):
-    end = datetime.today()
-    start = end - timedelta(days=LOOKBACK_DAYS)
-    df = yf.download(ticker, start=start, end=end, progress=False)
-
-    if df.empty:
-        return None, None
-
-    df["EMA20"] = ema(df["Close"], 20)
-    df["EMA50"] = ema(df["Close"], 50)
-    df["RSI"] = rsi(df["Close"])
-    df["MACD"], df["MACD_signal"] = macd(df["Close"])
-    df["VolumeMA20"] = df["Volume"].rolling(20).mean()
+# ----------------------------
+# SIGNAL LOGIC
+# ----------------------------
+def generate_signals(df):
+    if len(df) < 2:
+        return None
 
     latest = df.iloc[-1]
     prev = df.iloc[-2]
 
-    trend = latest["EMA20"] > latest["EMA50"]
-    macd_cross = (prev["MACD"] < prev["MACD_signal"]) and (latest["MACD"] > latest["MACD_signal"])
-    macd_bear = (prev["MACD"] > prev["MACD_signal"]) and (latest["MACD"] < latest["MACD_signal"])
+    macd_cross = (
+        (prev["MACD"].item() < prev["MACD_signal"].item()) and 
+        (latest["MACD"].item() > latest["MACD_signal"].item())
+    )
+    macd_bear = (
+        (prev["MACD"].item() > prev["MACD_signal"].item()) and 
+        (latest["MACD"].item() < latest["MACD_signal"].item())
+    )
 
-    buy = sell = False
-    reason = ""
+    buy_signal = (latest["EMA20"] > latest["EMA50"]) and macd_cross
+    sell_signal = (latest["EMA20"] < latest["EMA50"]) and macd_bear
 
-    if trend and latest["RSI"] > 40 and latest["RSI"] < 65 and macd_cross:
-        buy = True
-        reason = "Trend + RSI + MACD bullish crossover"
-    elif macd_bear or latest["RSI"] > 70 or latest["Close"] < latest["EMA20"]:
-        sell = True
-        reason = "MACD bearish / RSI high / below EMA20"
+    if buy_signal:
+        return "BUY"
+    elif sell_signal:
+        return "SELL"
     else:
-        reason = "Hold / Neutral"
+        return "HOLD"
 
-    entry = latest["Close"]
-    target = entry * (1 + TARGET_PCT)
-    stop = entry * (1 - STOP_PCT)
+signal = generate_signals(df)
 
-    return {
-        "Ticker": ticker,
-        "Close": round(entry, 2),
-        "RSI": round(latest["RSI"], 2),
-        "Trend": "Up" if trend else "Down",
-        "Signal": "BUY ✅" if buy else ("SELL 🚫" if sell else "HOLD ⚪"),
-        "Reason": reason,
-        "Target": round(target, 2),
-        "Stop": round(stop, 2)
-    }, df
+# ----------------------------
+# DISPLAY SIGNAL
+# ----------------------------
+col1, col2 = st.columns([1, 3])
+with col1:
+    st.metric("Current Price", f"₹{df['Close'].iloc[-1]:.2f}")
+    if signal == "BUY":
+        st.success("✅ BUY Signal Detected")
+    elif signal == "SELL":
+        st.error("🔻 SELL Signal Detected")
+    else:
+        st.info("⏸ HOLD / WAIT")
 
-# ------------------------
-# Main app
-# ------------------------
-data_list = []
-progress = st.progress(0)
-for i, t in enumerate(TICKERS):
-    res, df = analyze_ticker(t)
-    if res:
-        data_list.append(res)
-    progress.progress((i+1)/len(TICKERS))
+# ----------------------------
+# PRICE CHART
+# ----------------------------
+fig = go.Figure()
+fig.add_trace(go.Candlestick(
+    x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+    name="Price"
+))
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], name="EMA20", line=dict(color="orange", width=1.5)))
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA50", line=dict(color="blue", width=1.5)))
 
-if not data_list:
-    st.warning("No data found for selected tickers.")
-    st.stop()
+fig.update_layout(
+    title=f"{selected_ticker} Price & Signals",
+    xaxis_title="Date",
+    yaxis_title="Price (₹)",
+    xaxis_rangeslider_visible=False,
+    template="plotly_white",
+    height=500
+)
+st.plotly_chart(fig, use_container_width=True)
 
-df_all = pd.DataFrame(data_list)
-top10 = df_all.head(10)
+# ----------------------------
+# MACD CHART
+# ----------------------------
+fig2 = go.Figure()
+fig2.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD", line=dict(color="green")))
+fig2.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal", line=dict(color="red")))
+fig2.add_hline(y=0, line=dict(color="gray", dash="dot"))
+fig2.update_layout(title="MACD Indicator", height=300, template="plotly_white")
+st.plotly_chart(fig2, use_container_width=True)
 
-st.subheader("🔝 Top 10 Stocks with Current Signals")
-st.dataframe(top10, use_container_width=True)
+# ----------------------------
+# FOOTER
+# ----------------------------
+st.caption("📊 Data from Yahoo Finance | Built with ❤️ in Streamlit")
 
-# ------------------------
-# Chart section
-# ------------------------
-selected = st.selectbox("📊 Select a stock to view details", top10["Ticker"].tolist())
-if selected:
-    _, df_chart = analyze_ticker(selected)
-    if df_chart is not None:
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=df_chart.index,
-                                     open=df_chart["Open"], high=df_chart["High"],
-                                     low=df_chart["Low"], close=df_chart["Close"],
-                                     name="Price"))
-        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart["EMA20"], name="EMA20"))
-        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart["EMA50"], name="EMA50"))
-        fig.update_layout(title=f"{selected} Price with EMA20 & EMA50",
-                          xaxis_title="Date", yaxis_title="Price (INR)",
-                          xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("**RSI and MACD:**")
-        st.line_chart(df_chart[["RSI"]])
-        st.line_chart(df_chart[["MACD", "MACD_signal"]])
