@@ -66,11 +66,19 @@ def generate_signals(df):
     latest = df.iloc[-1]
     prev = df.iloc[-2]
 
-    macd_cross = (prev["MACD"] < prev["MACD_signal"]) and (latest["MACD"] > latest["MACD_signal"])
-    macd_bear = (prev["MACD"] > prev["MACD_signal"]) and (latest["MACD"] < latest["MACD_signal"])
+    # Ensure scalar values
+    macd_latest = latest["MACD"].item() if hasattr(latest["MACD"], "item") else latest["MACD"]
+    macd_prev = prev["MACD"].item() if hasattr(prev["MACD"], "item") else prev["MACD"]
+    macd_signal_latest = latest["MACD_signal"].item() if hasattr(latest["MACD_signal"], "item") else latest["MACD_signal"]
+    macd_signal_prev = prev["MACD_signal"].item() if hasattr(prev["MACD_signal"], "item") else prev["MACD_signal"]
+    ema20_latest = latest["EMA20"].item() if hasattr(latest["EMA20"], "item") else latest["EMA20"]
+    ema50_latest = latest["EMA50"].item() if hasattr(latest["EMA50"], "item") else latest["EMA50"]
 
-    buy_signal = (latest["EMA20"] > latest["EMA50"]) and macd_cross
-    sell_signal = (latest["EMA20"] < latest["EMA50"]) and macd_bear
+    macd_cross = (macd_prev < macd_signal_prev) and (macd_latest > macd_signal_latest)
+    macd_bear = (macd_prev > macd_signal_prev) and (macd_latest < macd_signal_latest)
+
+    buy_signal = (ema20_latest > ema50_latest) and macd_cross
+    sell_signal = (ema20_latest < ema50_latest) and macd_bear
 
     if buy_signal:
         return "BUY"
@@ -79,7 +87,6 @@ def generate_signals(df):
     else:
         return "HOLD"
 
-signal = generate_signals(df)
 
 # -----------------------------------------------------
 # SIGNAL COLUMN FOR HISTORY
